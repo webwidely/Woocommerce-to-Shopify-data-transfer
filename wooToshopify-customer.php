@@ -37,7 +37,7 @@ function webwidely_shopify_customer_export_page() {
         <div id="export-status-container" style="margin-top: 20px; max-width:800px;">
             <div id="export-status-text" style="margin-bottom:8px; color:#333;"></div>
             <div id="ww-progress" style="background:#e6e6e6; border-radius:6px; height:18px; overflow:hidden; display:none;">
-                <div id="ww-progress-bar" style="height:100%; width:0%; transition:width 300ms ease;"></div>
+                <div id="ww-progress-bar" style="height:100%; width:0%; transition:width 300ms ease; background:#0073aa;"></div>
             </div>
             <div id="export-log" style="margin-top:10px; font-size:13px; color:#666;"></div>
         </div>
@@ -47,10 +47,10 @@ function webwidely_shopify_customer_export_page() {
         var total_customers = 0;
         var csv_data = [];
         var headers = [
-            'First Name', 'Last Name', 'Email', 'Accepts Email Marketing', 'Default Address Company',
-            'Default Address Address1', 'Default Address Address2', 'Default Address City',
-            'Default Address Province Code', 'Default Address Country Code', 'Default Address Zip',
-            'Default Address Phone', 'Accepts SMS Marketing', 'Tags', 'Note', 'Tax Exempt'
+            'First Name', 'Last Name', 'Email', 'Accepts Email Marketing', 'Company',
+            'Address1', 'Address2', 'City',
+            'Province Code', 'Country Code', 'Zip',
+            'Phone', 'Accepts SMS Marketing', 'Tags', 'Note', 'Tax Exempt'
         ];
 
         var webwidely_exporter = {
@@ -188,15 +188,18 @@ function webwidely_ajax_export_customers() {
     $batch_size = 500;
     $offset = isset( $_POST['offset'] ) ? intval( $_POST['offset'] ) : 0;
 
+    // Get all unique emails from both users and orders
     $orders_emails_sql = "SELECT LOWER(pm.meta_value) AS email
         FROM {$wpdb->postmeta} pm
         JOIN {$wpdb->posts} p ON pm.post_id = p.ID
         WHERE p.post_type = 'shop_order'
           AND pm.meta_key = '_billing_email'
-          AND p.post_status NOT LIKE 'trash'";
+          AND p.post_status NOT IN ('auto-draft', 'trash')
+          AND pm.meta_value != ''";
 
     $users_emails_sql = "SELECT LOWER(user_email) AS email
-        FROM {$wpdb->users}";
+        FROM {$wpdb->users}
+        WHERE user_email != ''";
 
     $union_sql = "($orders_emails_sql) UNION ($users_emails_sql)";
 
@@ -235,23 +238,41 @@ function webwidely_ajax_export_customers() {
                 // Prefer billing fields from WC customer; if empty, fall back to WP user meta
                 $first = $customer->get_billing_first_name() ?: get_user_meta( $user->ID, 'first_name', true );
                 $last  = $customer->get_billing_last_name()  ?: get_user_meta( $user->ID, 'last_name', true );
+                
+                // Handle missing last names - use first name or placeholder if none exists
+                if (empty($last)) {
+                    if (!empty($first)) {
+                        // If we have a first name but no last name, use the first name for both
+                        $last = $first;
+                    } else {
+                        // If we have no name at all, use a placeholder
+                        $first = 'Customer';
+                        $last = 'Unknown';
+                    }
+                }
+                
+                // Handle missing first names
+                if (empty($first)) {
+                    $first = 'Unknown';
+                }
+
                 $row = array(
-                    'First Name'                => $first ?: '',
-                    'Last Name'                 => $last ?: '',
+                    'First Name'                => $first,
+                    'Last Name'                 => $last,
                     'Email'                     => $email,
-                    'Accepts Email Marketing'   => 'false',
-                    'Default Address Company'   => $customer->get_billing_company() ?: '',
-                    'Default Address Address1'  => $customer->get_billing_address_1() ?: '',
-                    'Default Address Address2'  => $customer->get_billing_address_2() ?: '',
-                    'Default Address City'      => $customer->get_billing_city() ?: '',
-                    'Default Address Province Code' => $customer->get_billing_state() ?: '',
-                    'Default Address Country Code'  => $customer->get_billing_country() ?: '',
-                    'Default Address Zip'       => $customer->get_billing_postcode() ?: '',
-                    'Default Address Phone'     => $customer->get_billing_phone() ?: '',
-                    'Accepts SMS Marketing'     => 'false',
+                    'Accepts Email Marketing'   => 'FALSE', // Shopify expects uppercase
+                    'Company'                   => $customer->get_billing_company() ?: '',
+                    'Address1'                  => $customer->get_billing_address_1() ?: '',
+                    'Address2'                  => $customer->get_billing_address_2() ?: '',
+                    'City'                      => $customer->get_billing_city() ?: '',
+                    'Province Code'             => $customer->get_billing_state() ?: '',
+                    'Country Code'              => $customer->get_billing_country() ?: '',
+                    'Zip'                       => $customer->get_billing_postcode() ?: '',
+                    'Phone'                     => $customer->get_billing_phone() ?: '',
+                    'Accepts SMS Marketing'     => 'FALSE', // Shopify expects uppercase
                     'Tags'                      => '',
                     'Note'                      => 'Imported from WooCommerce on ' . date('Y-m-d'),
-                    'Tax Exempt'                => 'false'
+                    'Tax Exempt'                => 'FALSE' // Shopify expects uppercase
                 );
             } else {
                 // Guest: get the latest order with this billing email and pull its billing meta
@@ -261,7 +282,7 @@ function webwidely_ajax_export_customers() {
                      WHERE p.post_type = 'shop_order'
                        AND pm.meta_key = '_billing_email'
                        AND LOWER(pm.meta_value) = %s
-                       AND p.post_status NOT LIKE 'trash'
+                       AND p.post_status NOT IN ('auto-draft', 'trash')
                      ORDER BY p.post_date DESC
                      LIMIT 1",
                     $email
@@ -282,24 +303,41 @@ function webwidely_ajax_export_customers() {
                     $postcode = get_post_meta( $order_id, '_billing_postcode', true );
                     $phone    = get_post_meta( $order_id, '_billing_phone', true );
                 }
+                
+                // Handle missing last names for guest orders
+                if (empty($last)) {
+                    if (!empty($first)) {
+                        // If we have a first name but no last name, use the first name for both
+                        $last = $first;
+                    } else {
+                        // If we have no name at all, use a placeholder
+                        $first = 'Customer';
+                        $last = 'Unknown';
+                    }
+                }
+                
+                // Handle missing first names for guest orders
+                if (empty($first)) {
+                    $first = 'Unknown';
+                }
 
                 $row = array(
-                    'First Name'                => $first ?: '',
-                    'Last Name'                 => $last ?: '',
+                    'First Name'                => $first,
+                    'Last Name'                 => $last,
                     'Email'                     => $email,
-                    'Accepts Email Marketing'   => 'false',
-                    'Default Address Company'   => $company ?: '',
-                    'Default Address Address1'  => $address1 ?: '',
-                    'Default Address Address2'  => $address2 ?: '',
-                    'Default Address City'      => $city ?: '',
-                    'Default Address Province Code' => $state ?: '',
-                    'Default Address Country Code'  => $country ?: '',
-                    'Default Address Zip'       => $postcode ?: '',
-                    'Default Address Phone'     => $phone ?: '',
-                    'Accepts SMS Marketing'     => 'false',
+                    'Accepts Email Marketing'   => 'FALSE', // Shopify expects uppercase
+                    'Company'                   => $company ?: '',
+                    'Address1'                  => $address1 ?: '',
+                    'Address2'                  => $address2 ?: '',
+                    'City'                      => $city ?: '',
+                    'Province Code'             => $state ?: '',
+                    'Country Code'              => $country ?: '',
+                    'Zip'                       => $postcode ?: '',
+                    'Phone'                     => $phone ?: '',
+                    'Accepts SMS Marketing'     => 'FALSE', // Shopify expects uppercase
                     'Tags'                      => '',
                     'Note'                      => 'Imported from WooCommerce (guest order) on ' . date('Y-m-d'),
-                    'Tax Exempt'                => 'false'
+                    'Tax Exempt'                => 'FALSE' // Shopify expects uppercase
                 );
             }
 
